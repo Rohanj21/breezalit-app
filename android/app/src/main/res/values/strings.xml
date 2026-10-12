@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">BreezalitApp</string>
+    <string name="title_activity_main">BreezalitApp</string>
+    <string name="package_name">com.breezalit.app</string>
+    <string name="custom_url_scheme">com.breezalit.app</string>
+</resources>

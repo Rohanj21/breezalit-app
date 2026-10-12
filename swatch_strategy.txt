@@ -1,0 +1,7 @@
+--- Store API Var 473 ---
+Extensions: {}
+Full JSON keys containing swatch: 
+No "swatch" string found in Store API response.
+
+--- Solution Strategy ---
+Since Store API lacks custom meta, and V3 API returns 401, the most robust way in the app is to fetch the product HTML, regex the data-product_variations JSON, and map swatch_image_url to the variation ID.
