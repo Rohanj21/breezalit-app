@@ -9,6 +9,9 @@ import { renderCheckout, onCheckoutMount } from "./pages/checkout";
 import { renderCompare, onCompareMount } from "./pages/compare";
 import { renderTracking, onTrackingMount } from "./pages/tracking";
 import { renderRewards, onRewardsMount } from "./pages/rewards";
+import { renderWishlist, onWishlistMount } from "./pages/wishlist";
+import { toggleWish, wishItemFromElement, updateWishBadge } from "./wishlist-store";
+import { showToast } from "./toast";
 import { updateBadge } from "./cart-store";
 import { getProducts, proxyImageUrl, setupSecureImageLoader } from "./api";
 import { initChatbot } from "./chatbot";
@@ -92,6 +95,11 @@ document.addEventListener("DOMContentLoaded", () => {
         onMounted: () => onTrackingMount(),
       },
       {
+        path: "/wishlist",
+        render: renderWishlist,
+        onMounted: () => onWishlistMount(),
+      },
+      {
         path: "/rewards",
         render: renderRewards,
         onMounted: () => onRewardsMount(),
@@ -101,6 +109,21 @@ document.addEventListener("DOMContentLoaded", () => {
   );
 
   updateBadge();
+  updateWishBadge();
+
+  // Hearts on product cards (shop, home, …): toggle without opening the product
+  document.addEventListener("click", (e) => {
+    const heart = (e.target as HTMLElement).closest<HTMLElement>(".card-wishlist, .scroller-wishlist");
+    if (!heart) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const item = wishItemFromElement(heart);
+    if (!item) return;
+    const nowWished = toggleWish(item);
+    heart.classList.toggle("wished", nowWished);
+    gsap.fromTo(heart, { scale: 0.7 }, { scale: 1, duration: 0.4, ease: "elastic.out(1, 0.4)" });
+    showToast(nowWished ? "Saved to wishlist" : "Removed from wishlist");
+  }, true);
   initChatbot();
   initSocialProof();
   initFanFinder();

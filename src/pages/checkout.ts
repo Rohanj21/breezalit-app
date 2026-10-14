@@ -1,5 +1,5 @@
 // Checkout Page — sectioned form with inline validation, order summary and sticky pay bar
-import { getCart, getCartTotal, getCartSavings, getShipping, clearCart } from "../cart-store";
+import { getCart, getCartTotal, getCartSavings, getCartShipping, getCouponStatus, getGrandTotal, removeCoupon, clearCart } from "../cart-store";
 import { createOrder } from "../api";
 import gsap from "gsap";
 
@@ -39,9 +39,10 @@ export async function renderCheckout(): Promise<string> {
 
   const subtotal = getCartTotal();
   const cs = cart[0].currencySymbol;
-  const shipping = getShipping(subtotal);
+  const shipping = getCartShipping();
+  const couponStatus = getCouponStatus();
   const savings = getCartSavings();
-  const finalTotal = subtotal + shipping;
+  const finalTotal = getGrandTotal();
   const itemCount = cart.reduce((s, i) => s + i.quantity, 0);
 
   return `
@@ -144,6 +145,7 @@ export async function renderCheckout(): Promise<string> {
           <div class="summary-divider"></div>
           <div class="summary-line"><span>Subtotal</span><span>${cs}${inr(subtotal)}</span></div>
           ${savings > 0 ? `<div class="summary-line summary-savings"><span>You save</span><span>− ${cs}${inr(savings)}</span></div>` : ""}
+          ${couponStatus.discount > 0 ? `<div class="summary-line summary-savings"><span>Coupon (${couponStatus.coupon!.code})</span><span>− ${cs}${inr(couponStatus.discount)}</span></div>` : ""}
           <div class="summary-line"><span>Shipping</span><span class="${shipping === 0 ? "free-tag" : ""}">${shipping === 0 ? "Free" : `${cs}${inr(shipping)}`}</span></div>
           <div class="summary-divider"></div>
           <div class="summary-line total"><span>Total to pay</span><span>${cs}${inr(finalTotal)}</span></div>
@@ -238,7 +240,8 @@ export function onCheckoutMount() {
     const lastName = nameParts.slice(1).join(" ");
     const payment = document.querySelector('input[name="payment"]:checked') as HTMLInputElement | null;
     const phone = val("chk-phone").replace(/[\s-]/g, "").replace(/^(\+91|0)/, "");
-    const shippingCost = getShipping(getCartTotal());
+    const shippingCost = getCartShipping();
+    const coupon = getCouponStatus();
 
     const address = {
       first_name: firstName,
@@ -259,6 +262,7 @@ export function onCheckoutMount() {
       line_items: cart.map((c) => c.variationId
         ? { product_id: c.productId ?? c.id, variation_id: c.variationId, quantity: c.quantity }
         : { product_id: c.id, quantity: c.quantity }),
+      ...(coupon.coupon && coupon.discount > 0 ? { coupon_lines: [{ code: coupon.coupon.code }] } : {}),
       shipping_lines: [{
         method_id: "flat_rate",
         method_title: shippingCost === 0 ? "Free Shipping" : "Standard Delivery",
@@ -273,6 +277,7 @@ export function onCheckoutMount() {
     try {
       const res = await createOrder(orderData);
       clearCart();
+      removeCoupon();
       showSuccessOverlay(res.id);
     } catch (err: any) {
       if (formError) formError.textContent = "We couldn't place your order. " + (err?.message || "Please try again.");

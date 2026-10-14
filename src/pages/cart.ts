@@ -6,9 +6,15 @@ import {
   clearCart,
   getCartTotal,
   getCartSavings,
-  getShipping,
+  getCartShipping,
+  getCouponStatus,
+  getGrandTotal,
+  applyCoupon,
+  removeCoupon,
   FREE_DELIVERY_THRESHOLD,
 } from "../cart-store";
+import { fetchCoupon } from "../coupons";
+import { showToast } from "../toast";
 import { renderBundleCard, onBundleMount } from "../components/bundle-card";
 import { animateBadgePop, animateCountUp, animateRemoveItem, animateCartItems, animateShake } from "../animations";
 import gsap from "gsap";
@@ -43,9 +49,10 @@ export async function renderCart(): Promise<string> {
   const itemCount = cart.reduce((s, i) => s + i.quantity, 0);
   const remaining = FREE_DELIVERY_THRESHOLD - total;
   const progressPercent = Math.min(100, (total / FREE_DELIVERY_THRESHOLD) * 100);
-  const shipping = getShipping(total);
+  const shipping = getCartShipping();
   const savings = getCartSavings();
-  const grandTotal = total + shipping;
+  const couponStatus = getCouponStatus();
+  const grandTotal = getGrandTotal();
 
   return `
     <div class="cart-page">
@@ -101,10 +108,31 @@ export async function renderCart(): Promise<string> {
         `).join("")}
       </div>
 
+      <div class="cart-coupon" id="cart-coupon">
+        ${couponStatus.coupon
+      ? `<div class="coupon-applied ${couponStatus.shortBy > 0 ? "warn" : ""}">
+            <span class="coupon-applied-icon">🏷️</span>
+            <div class="coupon-applied-text">
+              <strong>${couponStatus.coupon.code}</strong>
+              <small>${couponStatus.shortBy > 0
+          ? `Add ${cs}${inr(couponStatus.shortBy)} more to use this coupon`
+          : `You save ${cs}${inr(couponStatus.discount)}`}</small>
+            </div>
+            <button class="coupon-remove" id="coupon-remove" type="button">Remove</button>
+          </div>`
+      : `<label class="coupon-label" for="coupon-input">Have a coupon?</label>
+          <div class="coupon-row">
+            <input type="text" id="coupon-input" placeholder="Enter code" autocomplete="off" autocapitalize="characters" />
+            <button class="coupon-apply" id="coupon-apply" type="button">Apply</button>
+          </div>
+          <p class="co-error" id="coupon-error"></p>`}
+      </div>
+
       <div class="cart-summary-card">
         <h3>Order summary</h3>
         <div class="summary-line"><span>Subtotal (${itemCount} item${itemCount === 1 ? "" : "s"})</span><span id="summary-subtotal">${cs}${inr(total)}</span></div>
         ${savings > 0 ? `<div class="summary-line summary-savings"><span>You save</span><span>− ${cs}${inr(savings)}</span></div>` : ""}
+        ${couponStatus.discount > 0 ? `<div class="summary-line summary-savings"><span>Coupon (${couponStatus.coupon!.code})</span><span>− ${cs}${inr(couponStatus.discount)}</span></div>` : ""}
         <div class="summary-line"><span>Shipping</span><span class="${shipping === 0 ? "free-tag" : ""}">${shipping === 0 ? "Free" : `${cs}${inr(shipping)}`}</span></div>
         <div class="summary-divider"></div>
         <div class="summary-line total"><span>Total</span><span id="summary-total">${cs}${inr(grandTotal)}</span></div>
@@ -195,6 +223,32 @@ export function onCartMount() {
     await Promise.all(items.map((item) => animateRemoveItem(item)));
     clearCart();
     animateBadgePop();
+    await reRender();
+  });
+
+  // ── Coupon apply / remove ──
+  const couponInput = document.getElementById("coupon-input") as HTMLInputElement | null;
+  const couponBtn = document.getElementById("coupon-apply") as HTMLButtonElement | null;
+  const couponError = document.getElementById("coupon-error");
+  const submitCoupon = async () => {
+    if (!couponInput || !couponBtn || couponBtn.disabled) return;
+    if (couponError) couponError.textContent = "";
+    couponBtn.disabled = true;
+    couponBtn.textContent = "Checking…";
+    try {
+      applyCoupon(await fetchCoupon(couponInput.value));
+      showToast("Coupon applied");
+      await reRender();
+    } catch (err: any) {
+      if (couponError) couponError.textContent = err?.message || "Couldn't apply this coupon";
+      couponBtn.disabled = false;
+      couponBtn.textContent = "Apply";
+    }
+  };
+  couponBtn?.addEventListener("click", submitCoupon);
+  couponInput?.addEventListener("keydown", (e) => { if (e.key === "Enter") submitCoupon(); });
+  document.getElementById("coupon-remove")?.addEventListener("click", async () => {
+    removeCoupon();
     await reRender();
   });
 

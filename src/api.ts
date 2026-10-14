@@ -291,3 +291,63 @@ export async function scrapeSwatchImages(permalink: string): Promise<Record<numb
         return {};
     }
 }
+
+// ── Reviews ────────────────────────────────────────────────────
+
+export interface ProductReview {
+    id: number;
+    date_created: string;
+    review: string; // HTML from WordPress — render as text only
+    rating: number;
+    reviewer: string;
+    verified?: boolean;
+    status?: string;
+}
+
+export async function getProductReviews(productId: number): Promise<ProductReview[]> {
+    return apiFetch<ProductReview[]>(
+        `/wp-json/wc/v3/products/reviews?product=${productId}&per_page=50&status=approved&orderby=date&order=desc`
+    );
+}
+
+export async function createProductReview(data: {
+    product_id: number;
+    review: string;
+    reviewer: string;
+    reviewer_email: string;
+    rating: number;
+}): Promise<ProductReview> {
+    return apiFetch<ProductReview>(`/wp-json/wc/v3/products/reviews`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+    });
+}
+
+// ── Coupons ────────────────────────────────────────────────────
+
+export interface WCCoupon {
+    id: number;
+    code: string;
+    description: string;
+    discount_type: "percent" | "fixed_cart" | "fixed_product" | string;
+    amount: string;
+    date_expires: string | null;
+    usage_limit: number | null;
+    usage_count: number;
+    free_shipping: boolean;
+    product_ids: number[];
+    excluded_product_ids: number[];
+    minimum_amount: string;
+    maximum_amount: string;
+    email_restrictions: string[];
+}
+
+export async function getCouponByCode(code: string): Promise<WCCoupon | null> {
+    const list = await apiFetch<WCCoupon[]>(`/wp-json/wc/v3/coupons?code=${encodeURIComponent(code)}`);
+    return list[0] ?? null;
+}
+
+export async function getAllCoupons(): Promise<WCCoupon[]> {
+    return apiFetch<WCCoupon[]>(`/wp-json/wc/v3/coupons?per_page=30`);
+}

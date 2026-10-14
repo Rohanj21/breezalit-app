@@ -2,6 +2,12 @@
 import { getProduct, getProducts, getProductVariation, scrapeSwatchImages, formatPrice, formatRegularPrice, getDiscountPercent, proxyImageUrl } from "../api";
 import type { Product } from "../api";
 import { addToCart } from "../cart-store";
+import { isWished, toggleWish, wishItemFromProduct } from "../wishlist-store";
+import { renderSpecsTab, renderDetailsTab, wireDetailsToggle, buildGlanceSlides, glanceClosed, rememberGlanceClosed } from "../pdp-content";
+import { reviewsShell, mountReviews } from "../pdp-reviews";
+import { fetchCoupon, fetchPublicOffers } from "../coupons";
+import { applyCoupon } from "../cart-store";
+import { showToast } from "../toast";
 import { renderBundleCard, onBundleMount } from "../components/bundle-card";
 import { openArViewer } from "../ar-viewer";
 import { openEnergyCalculator } from "../energy-calculator";
@@ -34,6 +40,17 @@ function productScrollerCard(product: Product): string {
     </a>
   `;
 }
+
+function ratingMarkup(count: number, avg: number): string {
+  if (count <= 0 || avg <= 0) return `<span class="pdp-tag-new">New</span>`;
+  const r = Math.round(avg);
+  const stars = "★".repeat(r) + "☆".repeat(5 - r);
+  return `<button class="pdp-rating-link" id="pdp-rating-link" type="button" aria-label="Read reviews">
+    <span class="stars">${stars}</span><b>${avg.toFixed(1)}</b><span class="pdp-rating-count">(${count})</span>
+  </button>`;
+}
+
+const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 function specCard(iconSvg: string, iconColor: string, bgColor: string, label: string, value: string): string {
   return `
@@ -180,12 +197,9 @@ export function onProductMount(params: Record<string, string>) {
       const container = document.getElementById("pdp-container");
       if (!container) return;
 
-      const rating = parseFloat(p.average_rating) || 5;
-      const fullStars = Math.round(rating);
-      const stars = "★".repeat(fullStars) + "☆".repeat(5 - fullStars);
-      const hasReviews = p.review_count > 0 && parseFloat(p.average_rating) > 0;
       const specs = getSpecs(p);
       const discount = getDiscountPercent(p.prices);
+      const glanceSlides = buildGlanceSlides(specs);
       const divisor = Math.pow(10, p.prices.currency_minor_unit);
       const priceNum = parseInt(p.prices.price) / divisor;
       const regPriceNum = parseInt(p.prices.regular_price) / divisor;
@@ -197,13 +211,6 @@ export function onProductMount(params: Record<string, string>) {
           a.name.toLowerCase() === "colours"
       );
       const colors = colorAttr ? colorAttr.terms : [];
-
-      // Strip HTML for clean description text
-      const cleanDesc = (html: string) => {
-        const div = document.createElement("div");
-        div.innerHTML = html;
-        return div.innerHTML;
-      };
 
       container.innerHTML = `
         <!-- Sticky Mini-Header (Hidden, slides down on scroll) -->
@@ -222,10 +229,10 @@ export function onProductMount(params: Record<string, string>) {
             </a>
           </div>
           <div class="pdp-gallery-actions">
-            <button class="pdp-wishlist-float" id="btn-wishlist">
+            <button class="pdp-wishlist-float${isWished(p.id) ? " wished" : ""}" id="btn-wishlist" type="button" aria-label="Save to wishlist" aria-pressed="${isWished(p.id)}">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
             </button>
-            <button class="pdp-share-float" id="btn-share">
+            <button class="pdp-share-float" id="btn-share" type="button" aria-label="Share">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
             </button>
           </div>
@@ -238,7 +245,17 @@ export function onProductMount(params: Record<string, string>) {
             `).join("")}
           </div>
 
-          ${p.on_sale ? `<span class="pdp-discount-badge-large">-${discount}%</span>` : ""}
+          ${glanceSlides.length > 0 && !glanceClosed() ? `
+          <div class="pdp-glance" id="pdp-glance" aria-live="polite">
+            <div class="glance-slides">
+              ${glanceSlides.map((sl, i) => `
+                <div class="glance-slide ${i === 0 ? "on" : ""}">
+                  <span class="glance-icon">${sl.icon}</span>
+                  <span class="glance-text"><small>${sl.label}</small><b>${sl.value}</b></span>
+                </div>`).join("")}
+            </div>
+            <button class="glance-close" id="glance-close" type="button" aria-label="Hide highlights">×</button>
+          </div>` : ""}
 
           ${p.images.length > 1 ? `
             <div class="gallery-nav-float">
@@ -258,13 +275,7 @@ export function onProductMount(params: Record<string, string>) {
             ${p.categories.length > 0 ? `<span class="pdp-eyebrow">${p.categories[0].name}</span>` : ""}
             <h1 class="pdp-name">${p.name}</h1>
             <div class="pdp-meta-row">
-              ${hasReviews
-                ? `<button class="pdp-rating-link" id="pdp-rating-link" aria-label="Read reviews">
-                     <span class="stars">${stars}</span>
-                     <b>${rating.toFixed(1)}</b>
-                     <span class="pdp-rating-count">(${p.review_count})</span>
-                   </button>`
-                : `<span class="pdp-tag-new">New</span>`}
+              <span id="pdp-rating-slot">${ratingMarkup(p.review_count, parseFloat(p.average_rating) || 0)}</span>
               <span class="pdp-stock ${p.is_in_stock ? "in" : "out"}">${p.is_in_stock ? "In stock" : "Out of stock"}</span>
               ${p.low_stock_remaining ? `<span class="pdp-urgency-badge" id="urgency-badge">Only ${p.low_stock_remaining} left!</span>` : ""}
             </div>
@@ -280,22 +291,26 @@ export function onProductMount(params: Record<string, string>) {
             <span class="pdp-tax-note">Inclusive of all taxes</span>
           </div>
 
+          <!-- Offers (public coupons) -->
+          <div class="pdp-offers" id="pdp-offers" hidden></div>
+
           <!-- Colour selector -->
           ${colors.length > 0 ? `
             <div class="pdp-block pdp-colors-section">
               <div class="pdp-block-head">
                 <h3 class="pdp-section-label">Colour</h3>
-                <span class="pdp-selected-color" id="selected-color-name">${colors[0].name}</span>
+                <button class="pdp-color-clear" id="color-clear" type="button" hidden>Clear</button>
               </div>
+              <p class="pdp-selected-color" id="selected-color-name">Select a colour to see it on the fan</p>
               <div class="pdp-color-cards" id="color-swatches">
-                ${colors.map((c, i) => {
+                ${colors.map((c) => {
         const v = variationData.find(vd => vd.colorName.toLowerCase() === c.name.toLowerCase());
         const fallbackSwatch = proxyImageUrl(MANUAL_SWATCH_MAP?.[c.name] || "");
         const swatchUrl = v?.swatchImg ? proxyImageUrl(v.swatchImg) : fallbackSwatch;
         const lifestyleUrl = v?.lifestyleImg ? proxyImageUrl(v.lifestyleImg) : fallbackSwatch;
 
         return `
-                    <button class="color-card ${i === 0 ? "active" : ""}" data-var-id="${v?.id || ""}" data-color="${c.name}" data-img="${lifestyleUrl}" aria-label="${c.name}" title="${c.name}">
+                    <button class="color-card" aria-pressed="false" data-var-id="${v?.id || ""}" data-color="${c.name}" data-img="${lifestyleUrl}" aria-label="${c.name}" title="${c.name}">
                       <div class="color-card-img">
                         ${swatchUrl ? `<img src="${swatchUrl}" alt="${c.name}" loading="lazy" />` : `<div class="color-card-placeholder" style="background:#eef2f6;"></div>`}
                       </div>
@@ -358,28 +373,16 @@ export function onProductMount(params: Record<string, string>) {
             <div class="pdp-tab-bar">
               <button class="pdp-tab-btn active" data-tab="tab-specs">Specifications</button>
               <button class="pdp-tab-btn" data-tab="tab-details">Details</button>
-              <button class="pdp-tab-btn" data-tab="tab-reviews">Reviews</button>
+              <button class="pdp-tab-btn" data-tab="tab-reviews" id="tab-reviews-btn">Reviews${p.review_count > 0 ? ` (${p.review_count})` : ""}</button>
             </div>
             <div class="pdp-tab-content" id="tab-specs" style="display:block;">
-              ${p.short_description ? `<div class="desc-html">${cleanDesc(p.short_description)}</div>` : "<p>No specifications available.</p>"}
+              ${renderSpecsTab(p)}
             </div>
             <div class="pdp-tab-content" id="tab-details" style="display:none;">
-              ${p.description ? `<div class="desc-html">${cleanDesc(p.description)}</div>` : "<p>No additional details available.</p>"}
+              ${renderDetailsTab(p)}
             </div>
             <div class="pdp-tab-content" id="tab-reviews" style="display:none;">
-              ${hasReviews ? `
-              <div class="review-summary-bar">
-                <div class="review-score">
-                  <span class="review-big-num">${rating.toFixed(1)}</span>
-                  <div class="review-score-sub">
-                    <span class="stars">${stars}</span>
-                    <span>${p.review_count} review${p.review_count === 1 ? "" : "s"}</span>
-                  </div>
-                </div>
-              </div>` : `<p class="pdp-empty-note">No reviews yet. Be the first to share your experience.</p>`}
-              <div style="text-align: center; margin-bottom: 8px;">
-                <button class="btn-secondary-pill" id="btn-write-review">Write a Review</button>
-              </div>
+              ${reviewsShell()}
             </div>
           </div>
 
@@ -513,57 +516,104 @@ export function onProductMount(params: Record<string, string>) {
       });
 
       // ── Rating link jumps to the Reviews tab ──
-      document.getElementById("pdp-rating-link")?.addEventListener("click", () => {
+      container.addEventListener("click", (e) => {
+        if (!(e.target as HTMLElement).closest("#pdp-rating-link")) return;
         (container.querySelector('.pdp-tab-btn[data-tab="tab-reviews"]') as HTMLElement | null)?.click();
         container.querySelector(".pdp-tabs")?.scrollIntoView({ behavior: "smooth", block: "start" });
       });
 
-      // ── Color Card Selection + Image Switching ──
+      // ── Colour selection ──
+      // Tap a colour: the gallery locks on that colour's photo (no sliding).
+      // Tap it again (or "Clear"): the full gallery comes back.
       const swatchContainer = document.getElementById("color-swatches");
-      swatchContainer?.addEventListener("click", (e) => {
-        const card = (e.target as HTMLElement).closest(".color-card") as HTMLElement;
-        if (!card) return;
-        swatchContainer.querySelectorAll(".color-card").forEach(s => s.classList.remove("active"));
-        card.classList.add("active");
-        const colorLabel = document.getElementById("selected-color-name");
-        if (colorLabel) colorLabel.textContent = card.dataset.color || "";
-        gsap.fromTo(card, { scale: 0.9 }, { scale: 1, duration: 0.4, ease: "elastic.out(1, 0.4)" });
+      const gallerySlider = document.getElementById("gallery-slider");
+      const galleryEl = document.getElementById("pdp-gallery");
+      const colorLabel = document.getElementById("selected-color-name");
+      const colorClear = document.getElementById("color-clear") as HTMLButtonElement | null;
+      const basePriceText = formatPrice(p.prices);
+      const baseOldText = p.on_sale ? formatRegularPrice(p.prices) : "";
 
-        // Reflect the selected variation's price, if it has its own
-        const selVar = variationData.find(vd => String(vd.id) === card.dataset.varId);
-        if (selVar?.price) {
-          const fmt = `${p.prices.currency_symbol}${selVar.price.toLocaleString("en-IN")}`;
-          const nowEl = container.querySelector(".pdp-price-now");
-          const miniEl = container.querySelector(".mini-price");
-          if (nowEl) nowEl.textContent = fmt;
-          if (miniEl) miniEl.textContent = fmt;
-        }
+      const firstGalleryImg = () => gallerySlider?.querySelector(".gallery-slide img") as HTMLImageElement | null;
 
-        // Swap main gallery image
-        const newImg = card.dataset.img;
-        if (newImg) {
-          const gallerySlider = document.getElementById("gallery-slider");
-          const firstSlideImg = gallerySlider?.querySelector(".gallery-slide img") as HTMLImageElement;
-          if (firstSlideImg) {
-            gsap.to(firstSlideImg, {
-              opacity: 0, scale: 0.95, duration: 0.2,
-              onComplete: () => {
-                firstSlideImg.src = newImg;
-                const reveal = () => gsap.to(firstSlideImg, { opacity: 1, scale: 1, duration: 0.3, ease: "power2.out" });
-
-                if (firstSlideImg.complete) {
-                  reveal();
-                } else {
-                  firstSlideImg.onload = reveal;
-                  firstSlideImg.onerror = reveal; // ensure it comes back even if failed
-                }
-              }
-            });
-            // Scroll gallery to first slide
-            gallerySlider?.scrollTo({ left: 0, behavior: "smooth" });
+      const swapFirstImage = (src: string) => {
+        const img = firstGalleryImg();
+        if (!img) return;
+        gsap.to(img, {
+          opacity: 0, scale: 0.97, duration: 0.18,
+          onComplete: () => {
+            const reveal = () => gsap.to(img, { opacity: 1, scale: 1, duration: 0.3, ease: "power2.out" });
+            img.onload = reveal;
+            img.onerror = reveal; // never leave the image invisible
+            img.src = src;
+            if (img.complete) reveal();
           }
+        });
+      };
+
+      const lockGallery = (src: string) => {
+        const img = firstGalleryImg();
+        if (img && !img.dataset.orig) img.dataset.orig = img.getAttribute("src") || "";
+        galleryEl?.classList.add("locked");
+        gallerySlider?.scrollTo({ left: 0 });
+        swapFirstImage(src);
+      };
+
+      const unlockGallery = () => {
+        galleryEl?.classList.remove("locked");
+        const orig = firstGalleryImg()?.dataset.orig;
+        if (orig) swapFirstImage(orig);
+      };
+
+      const setPrice = (v: { price: number | null; regularPrice: number | null } | null) => {
+        const cs = p.prices.currency_symbol;
+        const nowText = v?.price ? `${cs}${v.price.toLocaleString("en-IN")}` : basePriceText;
+        container.querySelector(".pdp-price-now")!.textContent = nowText;
+        const mini = container.querySelector(".mini-price");
+        if (mini) mini.textContent = nowText;
+
+        const oldEl = container.querySelector(".pdp-price-old");
+        const pill = container.querySelector(".pdp-save-pill");
+        if (v?.price && v.regularPrice && v.regularPrice > v.price) {
+          if (oldEl) oldEl.textContent = `${cs}${v.regularPrice.toLocaleString("en-IN")}`;
+          if (pill) pill.textContent = `Save ${Math.round(((v.regularPrice - v.price) / v.regularPrice) * 100)}%`;
+        } else if (oldEl && baseOldText) {
+          oldEl.textContent = baseOldText;
+          if (pill) pill.textContent = `Save ${discount}%`;
         }
+      };
+
+      const selectColor = (card: HTMLElement | null) => {
+        swatchContainer?.querySelectorAll(".color-card").forEach((c) => {
+          c.classList.remove("active");
+          c.setAttribute("aria-pressed", "false");
+        });
+
+        if (!card) {
+          if (colorLabel) { colorLabel.textContent = "Select a colour to see it on the fan"; colorLabel.classList.remove("chosen"); }
+          if (colorClear) colorClear.hidden = true;
+          setPrice(null);
+          unlockGallery();
+          return;
+        }
+
+        card.classList.add("active");
+        card.setAttribute("aria-pressed", "true");
+        if (colorLabel) { colorLabel.textContent = card.dataset.color || ""; colorLabel.classList.add("chosen"); }
+        if (colorClear) colorClear.hidden = false;
+        setPrice(variationData.find((vd) => String(vd.id) === card.dataset.varId) || null);
+
+        const photo = card.dataset.img;
+        if (photo) lockGallery(photo); else unlockGallery();
+      };
+
+      swatchContainer?.addEventListener("click", (e) => {
+        const card = (e.target as HTMLElement).closest(".color-card") as HTMLElement | null;
+        if (!card) return;
+        const wasActive = card.classList.contains("active");
+        gsap.fromTo(card, { scale: 0.92 }, { scale: 1, duration: 0.35, ease: "elastic.out(1, 0.4)" });
+        selectColor(wasActive ? null : card);
       });
+      colorClear?.addEventListener("click", () => selectColor(null));
 
       // ── AR Viewer Integration ──
       const arBtn = document.getElementById("btn-ar-visualize");
@@ -609,18 +659,16 @@ export function onProductMount(params: Record<string, string>) {
       // ── Size Guide ──
       document.getElementById("btn-size-guide")?.addEventListener("click", () => openSizeGuide());
 
-      // ── Wishlist Heart Animation ──
+      // ── Wishlist ──
       const wishlistBtn = document.getElementById("btn-wishlist");
-      let loved = false;
       wishlistBtn?.addEventListener("click", () => {
-        loved = !loved;
-        if (loved) {
-          gsap.fromTo(wishlistBtn, { scale: 0.5 }, { scale: 1.3, duration: 0.4, ease: "elastic.out(1, 0.3)" });
-          gsap.to(wishlistBtn, { scale: 1, duration: 0.2, delay: 0.4 });
-          wishlistBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="#e02b2b" stroke="#e02b2b" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
-        } else {
-          wishlistBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
+        const nowWished = toggleWish(wishItemFromProduct(p));
+        wishlistBtn.classList.toggle("wished", nowWished);
+        wishlistBtn.setAttribute("aria-pressed", String(nowWished));
+        if (nowWished) {
+          gsap.fromTo(wishlistBtn, { scale: 0.6 }, { scale: 1, duration: 0.5, ease: "elastic.out(1, 0.35)" });
         }
+        showToast(nowWished ? "Saved to wishlist" : "Removed from wishlist");
       });
 
       // ── Share Button ──
@@ -630,10 +678,7 @@ export function onProductMount(params: Record<string, string>) {
             await navigator.share({ title: p.name, text: `Check out ${p.name} on Breezalit!`, url: window.location.href });
           } else {
             await navigator.clipboard.writeText(window.location.href);
-            const btn = document.getElementById("btn-share");
-            if (btn) {
-              gsap.fromTo(btn, { scale: 0.8 }, { scale: 1, duration: 0.4, ease: "elastic.out(1, 0.4)" });
-            }
+            showToast("Link copied");
           }
         } catch (_e) { /* user cancelled */ }
       });
@@ -660,15 +705,19 @@ export function onProductMount(params: Record<string, string>) {
       });
 
       // ── Cart item for the currently selected colour/variation ──
-      const buildCartItem = () => {
+      const selectedVariation = () => {
         const activeCard = container.querySelector(".color-card.active") as HTMLElement | null;
-        const v = activeCard ? variationData.find(vd => String(vd.id) === activeCard.dataset.varId) : undefined;
-        const colorName = activeCard?.dataset.color;
+        if (activeCard) return variationData.find((vd) => String(vd.id) === activeCard.dataset.varId);
+        return variationData.length === 1 ? variationData[0] : undefined;
+      };
+
+      const buildCartItem = () => {
+        const v = selectedVariation();
         return {
           id: v ? v.id : p.id,
           productId: p.id,
           variationId: v ? v.id : undefined,
-          name: colorName && colors.length > 1 ? `${p.name} – ${colorName}` : p.name,
+          name: v && colors.length > 1 ? `${p.name} – ${v.colorName}` : p.name,
           price: v?.price ?? priceNum,
           regularPrice: v?.regularPrice ?? regPriceNum,
           currencySymbol: p.prices.currency_symbol,
@@ -716,19 +765,34 @@ export function onProductMount(params: Record<string, string>) {
       const initialActions = container.querySelector("#pdp-actions-initial") as HTMLElement;
       const addedActions = container.querySelector("#pdp-actions-added") as HTMLElement;
 
-      const addSelectedToCart = () => {
+      const addSelectedToCart = (): boolean => {
+        // Variable products need a concrete colour so the order line is valid
+        if (p.type === "variable" && !selectedVariation()) {
+          if (variationData.length === 0) {
+            showToast("This product can't be added right now. Please try again later.", "error");
+            return false;
+          }
+          const block = container.querySelector(".pdp-colors-section") as HTMLElement | null;
+          if (block) {
+            block.scrollIntoView({ behavior: "smooth", block: "center" });
+            animateShake(block);
+          }
+          showToast("Please select a colour first", "error");
+          return false;
+        }
         addedItem = buildCartItem();
         addToCart(addedItem, qty);
+        return true;
       };
 
       container.querySelector("#btn-buy")?.addEventListener("click", () => {
-        addSelectedToCart();
+        if (!addSelectedToCart()) return;
         animateBadgePop();
         window.location.hash = "#/checkout";
       });
 
       atcBtn?.addEventListener("click", () => {
-        addSelectedToCart();
+        if (!addSelectedToCart()) return;
 
         // Flying cart animation
         animateFlyToCart(atcBtn);
@@ -757,64 +821,76 @@ export function onProductMount(params: Record<string, string>) {
         }, 1200);
       });
 
-      // ── Write Review Modal ──
-      document.getElementById("btn-write-review")?.addEventListener("click", () => {
-        const overlay = document.createElement("div");
-        overlay.className = "review-modal-overlay";
-        overlay.innerHTML = `
-          <div class="review-modal-content">
-            <div class="review-modal-header">
-              <h3>Write a Review</h3>
-              <button class="btn-close-modal" id="btn-close-review">×</button>
-            </div>
-            <div class="review-modal-stars" id="review-stars">
-              <span data-val="1">★</span><span data-val="2">★</span><span data-val="3">★</span><span data-val="4">★</span><span data-val="5">★</span>
-            </div>
-            <textarea placeholder="Share your experience with this product..."></textarea>
-            <button class="btn-primary-pill w-full" id="btn-submit-review" style="width: 100%;">Submit Review</button>
-          </div>
-        `;
-        document.body.appendChild(overlay);
-
-        gsap.fromTo(overlay, { opacity: 0 }, { opacity: 1, duration: 0.3 });
-        gsap.fromTo(".review-modal-content", { y: 40, scale: 0.95, opacity: 0 }, { y: 0, scale: 1, opacity: 1, duration: 0.4, ease: "back.out(1.5)", delay: 0.1 });
-
-        let selectedStars = 0;
-        const stars = overlay.querySelectorAll(".review-modal-stars span");
-        stars.forEach(star => {
-          star.addEventListener("click", () => {
-            selectedStars = parseInt((star as HTMLElement).dataset.val || "0");
-            stars.forEach(s => {
-              if (parseInt((s as HTMLElement).dataset.val || "0") <= selectedStars) s.classList.add("active");
-              else s.classList.remove("active");
-            });
-            gsap.fromTo(star, { scale: 0.5, rotation: -30 }, { scale: 1, rotation: 0, duration: 0.4, ease: "elastic.out(1, 0.4)" });
-          });
+      // ── Reviews (live from WooCommerce) ──
+      const reviewsRoot = document.getElementById("reviews-root");
+      if (reviewsRoot) {
+        mountReviews(reviewsRoot, p.id, p.name, (stats) => {
+          const slot = document.getElementById("pdp-rating-slot");
+          if (slot) slot.innerHTML = ratingMarkup(stats.count, stats.average);
+          const tabBtn = document.getElementById("tab-reviews-btn");
+          if (tabBtn) tabBtn.textContent = stats.count ? `Reviews (${stats.count})` : "Reviews";
         });
+      }
 
-        const closeModal = () => {
-          gsap.to(overlay, { opacity: 0, duration: 0.3, onComplete: () => overlay.remove() });
-          gsap.to(".review-modal-content", { scale: 0.9, y: 20, opacity: 0, duration: 0.3 });
-        };
+      // ── Details "Read more" ──
+      wireDetailsToggle(container);
 
-        overlay.querySelector("#btn-close-review")?.addEventListener("click", closeModal);
-        overlay.addEventListener("click", (e) => {
-          if (e.target === overlay) closeModal();
-        });
+      // ── Offers: coupons the store marked public ──
+      const offersEl = document.getElementById("pdp-offers");
+      if (offersEl) {
+        fetchPublicOffers()
+          .then((offers) => {
+            if (offers.length === 0 || !document.body.contains(offersEl)) return;
+            offersEl.hidden = false;
+            offersEl.innerHTML = `
+              <h3 class="pdp-section-label">Offers for you</h3>
+              <div class="offer-list">
+                ${offers.map((o) => `
+                  <div class="offer-card">
+                    <div class="offer-text"><b>${esc(o.code)}</b><span>${esc(o.text)}</span></div>
+                    <button class="offer-apply" data-code="${esc(o.code)}" type="button">Apply</button>
+                  </div>`).join("")}
+              </div>`;
+          })
+          .catch(() => { /* offers are optional */ });
 
-        overlay.querySelector("#btn-submit-review")?.addEventListener("click", (e) => {
-          const btn = e.target as HTMLButtonElement;
-          if (selectedStars === 0) {
-            animateShake(overlay.querySelector(".review-modal-stars") as HTMLElement);
-            return;
-          }
-          btn.innerHTML = "Review Submitted ✓";
-          btn.style.background = "#27ae60";
+        offersEl.addEventListener("click", async (e) => {
+          const btn = (e.target as HTMLElement).closest(".offer-apply") as HTMLButtonElement | null;
+          if (!btn || btn.disabled) return;
           btn.disabled = true;
-          gsap.fromTo(btn, { scale: 0.9 }, { scale: 1, duration: 0.4, ease: "back.out(1.5)" });
-          setTimeout(closeModal, 1200);
+          btn.textContent = "Applying…";
+          try {
+            applyCoupon(await fetchCoupon(btn.dataset.code || ""));
+            btn.textContent = "Applied ✓";
+            showToast(`${btn.dataset.code} applied — see it in your cart`);
+          } catch (err: any) {
+            btn.disabled = false;
+            btn.textContent = "Apply";
+            showToast(err?.message || "Couldn't apply this coupon", "error");
+          }
         });
-      });
+      }
+
+      // ── "At a glance" slider on the image ──
+      const glance = document.getElementById("pdp-glance");
+      if (glance) {
+        const slideEls = glance.querySelectorAll(".glance-slide");
+        let gi = 0;
+        const glanceTimer = setInterval(() => {
+          if (!document.body.contains(glance)) { clearInterval(glanceTimer); return; }
+          if (slideEls.length < 2) return;
+          slideEls[gi].classList.remove("on");
+          gi = (gi + 1) % slideEls.length;
+          slideEls[gi].classList.add("on");
+        }, 3200);
+
+        document.getElementById("glance-close")?.addEventListener("click", () => {
+          clearInterval(glanceTimer);
+          rememberGlanceClosed();
+          glance.classList.add("closing");
+          setTimeout(() => glance.remove(), 250);
+        });
+      }
 
     } catch (err) {
       console.error("PDP error:", err);
